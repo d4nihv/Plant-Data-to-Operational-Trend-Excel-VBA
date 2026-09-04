@@ -1,0 +1,336 @@
+Sub ImportCCUSData()
+    Dim wsData As Worksheet
+    Dim FileToOpen As Variant
+    Dim OpenBook As Workbook
+    
+    Set wsData = ThisWorkbook.Sheets("PlantData")
+    wsData.Cells.Clear
+    
+    FileToOpen = Application.GetOpenFilename(Title:="Select Plant Excel Export", FileFilter:="Excel Files (*.xls*),*.xls*")
+    
+    If FileToOpen <> False Then
+        Set OpenBook = Application.Workbooks.Open(FileToOpen)
+        OpenBook.Sheets(1).UsedRange.Copy
+        wsData.Range("A1").PasteSpecial Paste:=xlPasteValues
+        OpenBook.Close False
+        Application.CutCopyMode = False
+    Else
+        MsgBox "Import canceled.", vbExclamation
+        End
+    End If
+End Sub
+
+Sub CreateSearchCharts()
+    Dim wsData As Worksheet, wsDash As Worksheet
+    Dim lastRow As Long, lastCol As Long, c As Long
+    Dim cht As ChartObject, srs As Series
+    Dim chartTop As Double, chartLeft As Double
+    Dim chartCount As Integer, sensorName As String
+    
+    Set wsData = ThisWorkbook.Sheets("PlantData")
+    Set wsDash = ThisWorkbook.Sheets("Dashboard")
+    
+    For Each cht In wsDash.ChartObjects
+        cht.Delete
+    Next cht
+    
+    lastCol = wsData.Cells(1, wsData.Columns.Count).End(xlToLeft).Column
+    chartTop = 50
+    chartLeft = 50
+    chartCount = 0
+    
+    Application.ScreenUpdating = False
+    
+    For c = 1 To lastCol
+        If UCase(Trim(wsData.Cells(1, c).Value)) = "VALUE" Then
+            
+            sensorName = wsData.Cells(2, c - 2).Value
+            If sensorName = "" Then sensorName = "Unnamed Sensor"
+            lastRow = wsData.Cells(wsData.Rows.Count, c - 1).End(xlUp).Row
+            
+            If lastRow > 2 Then
+                
+                ' ==========================================
+                ' FIX 1: Add "20" to the year so Excel understands it, then convert
+                ' ==========================================
+                wsData.Columns(c - 1).Replace What:="21-", Replacement:="2021-", LookAt:=xlPart
+                wsData.Columns(c - 1).TextToColumns Destination:=wsData.Cells(1, c - 1), DataType:=xlDelimited
+                wsData.Columns(c).TextToColumns Destination:=wsData.Cells(1, c), DataType:=xlDelimited
+                
+                Set cht = wsDash.ChartObjects.Add(Left:=chartLeft, Width:=400, Top:=chartTop, Height:=220)
+                
+                With cht.Chart
+                    .ChartType = xlXYScatterLinesNoMarkers
+                    .HasTitle = True
+                    .ChartTitle.Text = sensorName
+                    .HasLegend = False
+                    
+                    Do While .SeriesCollection.Count > 0
+                        .SeriesCollection(1).Delete
+                    Loop
+                    
+                    Set srs = .SeriesCollection.NewSeries
+                    srs.XValues = wsData.Range(wsData.Cells(2, c - 1), wsData.Cells(lastRow, c - 1))
+                    srs.Values = wsData.Range(wsData.Cells(2, c), wsData.Cells(lastRow, c))
+                    
+                    ' ==========================================
+                    ' FIX 2: Hide the date and ONLY show the Time Trace on the X-Axis
+                    ' ==========================================
+                    .Axes(xlCategory).TickLabels.NumberFormat = "hh:mm:ss"
+                End With
+                
+                chartCount = chartCount + 1
+                
+                If chartCount Mod 2 = 0 Then
+                    chartTop = chartTop + 240
+                    chartLeft = 50
+                Else
+                    chartLeft = 470
+                End If
+                
+            End If
+        End If
+    Next c
+    
+    Application.ScreenUpdating = True
+    MsgBox "Dashboard successfully generated " & chartCount & " charts!", vbInformation
+End Sub
+
+Sub UpdateChartTimeFrame()
+    Dim wsDash As Worksheet
+    Dim chtObj As ChartObject
+    Dim startTime As Double, endTime As Double
+    
+    Set wsDash = ThisWorkbook.Sheets("Dashboard")
+    
+    On Error Resume Next
+    ' CDate natively converts whatever you type into the raw math Excel needs
+    startTime = CDbl(CDate(wsDash.Range("C1").Value))
+    endTime = CDbl(CDate(wsDash.Range("C2").Value))
+    On Error GoTo 0
+    
+    If startTime = 0 Or endTime = 0 Or startTime >= endTime Then
+        MsgBox "Please enter a valid Start and End time.", vbExclamation
+        Exit Sub
+    End If
+    
+    Application.ScreenUpdating = False
+    
+    For Each chtObj In wsDash.ChartObjects
+        On Error Resume Next
+        With chtObj.Chart.Axes(xlCategory)
+            .MinimumScale = startTime
+            .MaximumScale = endTime
+        End With
+        On Error GoTo 0
+    Next chtObj
+    
+    Application.ScreenUpdating = True
+    MsgBox "Time range updated!", vbInformation
+End Sub
+
+Sub RunCarbonCaptureReport()
+    Call ImportCCUSData
+    Call CreateSearchCharts
+End Sub
+
+Sub AddAuditIndicators()
+    Dim wsAudit As Worksheet, wsDash As Worksheet
+    Dim lastRow As Long, i As Long
+    Dim eventTimes() As Double, eventLabels() As String
+    Dim eventCount As Integer
+    Dim chtObj As ChartObject, srs As Series
+    Dim objName As String, msg As String
+    Dim valChange As String
+    Dim chartDate As Double, auditTime As Double
+    
+    Set wsAudit = ThisWorkbook.Sheets("ManualAudit")
+    Set wsDash = ThisWorkbook.Sheets("Dashboard")
+    
+    ' Grab the base date from your Time Filter (Cell C1) so they match
+    On Error Resume Next
+    chartDate = Int(CDbl(CDate(wsDash.Range("C1").Value)))
+    On Error GoTo 0
+    
+    If chartDate = 0 Then
+        MsgBox "Please enter a valid Start Time in C1 first so the audits know which day to plot on.", vbExclamation
+        Exit Sub
+    End If
+    
+    lastRow = wsAudit.Cells(wsAudit.Rows.Count, "B").End(xlUp).Row
+    eventCount = 0
+    
+    For i = 2 To lastRow
+        objName = UCase(Trim(wsAudit.Cells(i, 3).Value))
+        msg = UCase(Trim(wsAudit.Cells(i, 5).Value))
+        
+        If InStr(1, objName, "J100", vbTextCompare) > 0 And InStr(1, msg, "MANSP", vbTextCompare) > 0 Then
+            ReDim Preserve eventTimes(eventCount)
+            ReDim Preserve eventLabels(eventCount)
+            
+            ' Extract ONLY the time from the Audit sheet, then add it to your Dashboard's date
+            auditTime = CDbl(CDate(wsAudit.Cells(i, 2).Value)) - Int(CDbl(CDate(wsAudit.Cells(i, 2).Value)))
+            eventTimes(eventCount) = chartDate + auditTime
+            
+            valChange = Trim(Split(msg, "MANSP")(1))
+            eventLabels(eventCount) = valChange
+            
+            eventCount = eventCount + 1
+        End If
+    Next i
+    
+    If eventCount = 0 Then
+        MsgBox "No J100 manual pump changes found.", vbInformation
+        Exit Sub
+    End If
+    
+    Dim yValues() As Double
+    ReDim yValues(eventCount - 1)
+    For i = 0 To eventCount - 1
+        yValues(i) = 0 ' J100 sits at the bottom of the axis
+    Next i
+    
+    Application.ScreenUpdating = False
+    
+    For Each chtObj In wsDash.ChartObjects
+        With chtObj.Chart
+            
+            For i = .SeriesCollection.Count To 1 Step -1
+                If .SeriesCollection(i).Name = "J100 Audit" Then
+                    .SeriesCollection(i).Delete
+                End If
+            Next i
+            
+            Set srs = .SeriesCollection.NewSeries
+            srs.Name = "J100 Audit"
+            srs.XValues = eventTimes
+            srs.Values = yValues
+            srs.AxisGroup = xlSecondary
+            
+            srs.Format.Line.Visible = msoFalse
+            srs.MarkerStyle = xlMarkerStyleTriangle
+            srs.MarkerSize = 8
+            srs.MarkerForegroundColor = RGB(255, 0, 0)
+            srs.MarkerBackgroundColor = RGB(255, 0, 0)
+            
+            srs.HasDataLabels = True
+            For i = 1 To eventCount
+                srs.Points(i).DataLabel.Text = eventLabels(i - 1)
+                srs.Points(i).DataLabel.Position = xlLabelPositionAbove
+                srs.Points(i).DataLabel.Format.TextFrame2.TextRange.Font.Size = 9
+                srs.Points(i).DataLabel.Format.TextFrame2.TextRange.Font.Bold = msoTrue
+                srs.Points(i).DataLabel.Format.TextFrame2.TextRange.Font.Fill.ForeColor.RGB = RGB(255, 0, 0)
+            Next i
+            
+            .Axes(xlValue, xlSecondary).MinimumScale = 0
+            .Axes(xlValue, xlSecondary).MaximumScale = 1
+            .Axes(xlValue, xlSecondary).TickLabelPosition = xlTickLabelPositionNone
+            
+        End With
+    Next chtObj
+    
+    Application.ScreenUpdating = True
+    MsgBox eventCount & " J100 pump changes successfully mapped to the dashboard!", vbInformation
+End Sub
+
+Sub AddLT108AuditIndicators()
+    Dim wsAudit As Worksheet, wsDash As Worksheet
+    Dim lastRow As Long, i As Long
+    Dim eventTimes() As Double, eventLabels() As String
+    Dim eventCount As Integer
+    Dim chtObj As ChartObject, srs As Series
+    Dim objName As String, msg As String
+    Dim valChange As String
+    Dim chartDate As Double, auditTime As Double
+    
+    Set wsAudit = ThisWorkbook.Sheets("ManualAudit")
+    Set wsDash = ThisWorkbook.Sheets("Dashboard")
+    
+    ' Grab the base date from your Time Filter (Cell C1) so they match
+    On Error Resume Next
+    chartDate = Int(CDbl(CDate(wsDash.Range("C1").Value)))
+    On Error GoTo 0
+    
+    If chartDate = 0 Then
+        MsgBox "Please enter a valid Start Time in C1 first so the audits know which day to plot on.", vbExclamation
+        Exit Sub
+    End If
+    
+    lastRow = wsAudit.Cells(wsAudit.Rows.Count, "B").End(xlUp).Row
+    eventCount = 0
+    
+    For i = 2 To lastRow
+        objName = UCase(Trim(wsAudit.Cells(i, 3).Value))
+        msg = UCase(Trim(wsAudit.Cells(i, 5).Value))
+        
+        ' Look for "IO.VALUE" instead of "MANSP" for LT108
+        If InStr(1, objName, "LT108", vbTextCompare) > 0 And InStr(1, msg, "IO.VALUE", vbTextCompare) > 0 Then
+            ReDim Preserve eventTimes(eventCount)
+            ReDim Preserve eventLabels(eventCount)
+            
+            ' Extract ONLY the time from the Audit sheet, then add it to your Dashboard's date
+            auditTime = CDbl(CDate(wsAudit.Cells(i, 2).Value)) - Int(CDbl(CDate(wsAudit.Cells(i, 2).Value)))
+            eventTimes(eventCount) = chartDate + auditTime
+            
+            ' Extract the text after "IO.Value"
+            valChange = Trim(Split(msg, "IO.VALUE")(1))
+            eventLabels(eventCount) = valChange
+            
+            eventCount = eventCount + 1
+        End If
+    Next i
+    
+    If eventCount = 0 Then
+        MsgBox "No LT108 manual changes found.", vbInformation
+        Exit Sub
+    End If
+    
+    Dim yValues() As Double
+    ReDim yValues(eventCount - 1)
+    For i = 0 To eventCount - 1
+        yValues(i) = 1 ' LT108 sits at the TOP of the axis
+    Next i
+    
+    Application.ScreenUpdating = False
+    
+    For Each chtObj In wsDash.ChartObjects
+        With chtObj.Chart
+            
+            For i = .SeriesCollection.Count To 1 Step -1
+                If .SeriesCollection(i).Name = "LT108 Audit" Then
+                    .SeriesCollection(i).Delete
+                End If
+            Next i
+            
+            Set srs = .SeriesCollection.NewSeries
+            srs.Name = "LT108 Audit"
+            srs.XValues = eventTimes
+            srs.Values = yValues
+            srs.AxisGroup = xlSecondary
+            
+            srs.Format.Line.Visible = msoFalse
+            srs.MarkerStyle = xlMarkerStyleTriangle
+            srs.MarkerSize = 8
+            srs.MarkerForegroundColor = RGB(0, 112, 192) ' Blue
+            srs.MarkerBackgroundColor = RGB(0, 112, 192) ' Blue
+            
+            srs.HasDataLabels = True
+            For i = 1 To eventCount
+                srs.Points(i).DataLabel.Text = eventLabels(i - 1)
+                ' Placed BELOW the marker so text isn't cut off at the top boundary
+                srs.Points(i).DataLabel.Position = xlLabelPositionBelow
+                srs.Points(i).DataLabel.Format.TextFrame2.TextRange.Font.Size = 9
+                srs.Points(i).DataLabel.Format.TextFrame2.TextRange.Font.Bold = msoTrue
+                srs.Points(i).DataLabel.Format.TextFrame2.TextRange.Font.Fill.ForeColor.RGB = RGB(0, 112, 192)
+            Next i
+            
+            .Axes(xlValue, xlSecondary).MinimumScale = 0
+            .Axes(xlValue, xlSecondary).MaximumScale = 1
+            .Axes(xlValue, xlSecondary).TickLabelPosition = xlTickLabelPositionNone
+            
+        End With
+    Next chtObj
+    
+    Application.ScreenUpdating = True
+    MsgBox eventCount & " LT108 changes successfully mapped to the dashboard!", vbInformation
+End Sub
